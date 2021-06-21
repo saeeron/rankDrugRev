@@ -34,6 +34,9 @@ class RankDrugRev:
 		self.num_words = num_words
 		self.len_limit = len_limit
 
+		self._km_fitted = False
+		self._seq_fitted = False
+
 
 	def load_data(self):
 
@@ -57,10 +60,10 @@ class RankDrugRev:
 
 		df = self.raw_data_train
 
-		df = df[~df["condition"].str.contains("</span>").astype(bool)]
+		df = df.loc[~df["condition"].str.contains("</span>").astype(bool),:]
 
-		low_cond_list = df["condition"].value_counts()[df["condition"].value_counts() < 20].index.values.tolist()
-		low_drug_list = df["drugName"].value_counts()[df["drugName"].value_counts() < 20].index.values.tolist()
+		low_cond_list = df["condition"].value_counts()[df["condition"].value_counts() < 50].index.values.tolist()
+		low_drug_list = df["drugName"].value_counts()[df["drugName"].value_counts() < 50].index.values.tolist()
 
 		idx_ = (~df["condition"].isin(low_cond_list)) & (~df["drugName"].isin(low_drug_list))
 
@@ -105,12 +108,12 @@ class RankDrugRev:
 		else:
 			raise ValueError("no data are loaded!")
 
-
+		index_orig = np.array(df.index)
 		df = df.loc[~df["condition"].str.contains("</span>").astype(bool),:]
 
-		enc_cond = self._enc_cond
 		enc_drug = self._enc_drug
-
+		enc_cond = self._enc_cond
+		
 		drug_OH = enc_drug.transform(df["drugName"].values.reshape(-1,1)).toarray()
 		cond_OH = enc_cond.transform(df["condition"].values.reshape(-1,1)).toarray()
 
@@ -128,8 +131,11 @@ class RankDrugRev:
 
 		df.dropna(inplace = True)
 
+		
+
 		if df.empty:
 			raise ValueError('there is no relevant data in \"data\"!')
+
 
 
 		# preparing returns
@@ -145,33 +151,35 @@ class RankDrugRev:
 
 		rating = df["rating"].values.reshape((-1,1))
 
+		assert transformed_seqs.shape[0] == rating.shape[0] == drug_OH.shape[0] == cond_OH.shape[0]\
+		 		== useC.shape[0] == df.index.shape[0]
 
-		return transformed_seqs, rating, drug_OH, cond_OH, useC
+		return [transformed_seqs, drug_OH, cond_OH, rating], useC, df.index
 
 
-	def lstm_model(self, transformed_seqs, rating, drug_OH, cond_OH, useC , pretrained = True):
+	def lstm_model(self, X, y , pretrained = True, model_file = 'drugRevKM.h5'):
 		
 		if not pretrained:
 
 			# defining model
 			input_layer1 = keras.Input(shape=(None,), dtype="int32")
-			embed1 = Embedding(transformed_seqs.max() + 1, 64)(input_layer1)
+			embed1 = Embedding(X[0].max() + 1, 64)(input_layer1)
 			lstm1 = Bidirectional(LSTM(64, return_sequences=True))(embed1)
 			lstm2 = Bidirectional(LSTM(64))(lstm1)
 			dense_1 = Dense(1)(lstm2)
 
 			# input layer for drug 
-			input_layer2 = keras.Input(shape=(drug_OH.shape[1],), dtype="int32")
+			input_layer2 = keras.Input(shape=(X[1].shape[1],), dtype="int32")
 			dense_2 = Dense(12, activation="relu")(input_layer2)
 			dense_3 = Dense(1, activation="relu")(dense_2)
 
 			# input layer for condition
-			input_layer3 = keras.Input(shape=(cond_OH.shape[1],), dtype="int32")
+			input_layer3 = keras.Input(shape=(X[2].shape[1],), dtype="int32")
 			dense_4 = Dense(12, activation="relu")(input_layer3)
 			dense_5 = Dense(1, activation="relu")(dense_4)
 
 			# rating as an input
-			input_layer4 = keras.Input(shape=(rating.shape[1],), dtype="int32")  
+			input_layer4 = keras.Input(shape=(X[3].shape[1],), dtype="int32")  
 			dense_6 = Dense(12, activation="relu")(input_layer4)
 			dense_7 = Dense(1, activation="relu")(dense_6)
 
@@ -182,48 +190,75 @@ class RankDrugRev:
 
 			model = keras.Model(inputs = [input_layer1, input_layer2, input_layer3, input_layer4], outputs = output)
 
-			model.compile(optimizer = keras.optimizers.Adam(learning_rate = 0.01), loss="mse")
+			model.compile(optimizer = keras.optimizers.Adam(learning_rate = 0.005), loss="mse")
 
-			self.kmodel = model
-
-			history = model.fit(x = [transformed_seqs, drug_OH, cond_OH, rating] , y = useC, epochs = 2, validation_split = 0.2)
-			self._kmodel_history = history
+			history = model.fit(x = X , y = y, epochs = 4, validation_split = 0.2)
 
 			self._km_fitted = True
+
+			return model, history
 
 		else:
 
 			try: 
-				model = load_model('drugRevKM.h5')
+				model = load_model(model_file)
+				self.kmodel = model
 				print("pre-trainted model loaded!")
 				self._km_fitted = True
 			except OSError as err:
-				print("pre-trianed \"drugRevKM.h5\" file not found!")
+				print("pre-trianed file not found!")
 			
 
 
-	def save_model(self, *fnames):
+	def save_model(self, *fnames, model = None):
 
 		if len(fnames) == 0:
 			raise TypeError('no file names were provided!')
 
-		if (self._seq_fitted) & (not self._km_fitted):
+		if (model is None) and len(fnames) == 1:
 			with open(fnames[0], 'wb') as f:
 				f.write(dill.dumps(self))
 
-		if (self._seq_fitted) & (self._km_fitted) & (len(fnames) == 2):
+		elif (model is not None) & (len(fnames) == 2):
 			if fnames[1].split('.')[1] != 'h5':
 				raise ValueError('include \".h5\" for the keras model file name!')
 			else:
 				with open(fnames[0], 'wb') as f:
-					tmp = self
-					tmp.kmodel = []
-					f.write(dill.dumps(tmp))
-				self.kmodel.save(fnames[1])
+					f.write(dill.dumps(self))
+				model.save(fnames[1])
 
-	def load_model(self, *fnames):
+		else:
+			raise TypeError('no model was loaded! check fir correct arguments')
 
-		self.kmodel = keras.models.load_model(fnames[1])
+	@classmethod
+	def load_model(cls, *fnames):
+
+		ret = [] 
+		if len(fnames) >= 1:
+			with open(fnames[0], 'rb') as f:
+				ret.append(dill.loads(f.read()))
+
+			if len(fnames) == 2:
+				ret.append(keras.models.load_model(fnames[1]))
+
+		if not ret:
+			raise TypeError("no file names are provided")
+
+		return tuple(ret)
+
+	@classmethod
+	def plot_performance(y_obs, y_pred):
+
+		tmp_df = pd.DataFrame({'obs' : y_obs.ravel(), 'model' : y_pred.ravel()})
+		ax = sns.displot(data = tmp_df, x = 'obs', y = 'model', kind = 'kde' )
+		ax.ax.set_xlim(-5, 5)
+		ax.ax.set_ylim(-5, 5)
+
+		plt.show()
+
+
+
+		
 
 
 
