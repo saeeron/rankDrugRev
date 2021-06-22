@@ -27,18 +27,24 @@ import dill
 
 
 class RankDrugRev:
+	""" this class instantiates objects that can preprocess and model usefulness of reviews on drugs
+	across a vroad range of drugs and conditions """
 
 	data_url = 'https://archive.ics.uci.edu/ml/machine-learning-databases/00462/drugsCom_raw.zip'
 
-	def __init__(self, num_words = 5000, len_limit = None):
+	def __init__(self, num_words = 5000, max_len = 2000, len_limit = None):
 		self.num_words = num_words
 		self.len_limit = len_limit
+		self.max_len = max_len
 
 		self._km_fitted = False
 		self._seq_fitted = False
 
 
+
 	def load_data(self):
+		""" applying this function on self results in loading and storing data from online source, 
+		as pandas dataframe """
 
 		r = requests.get(RankDrugRev.data_url, verify = False)
 		z = zipfile.ZipFile(io.BytesIO(r.content))
@@ -54,6 +60,8 @@ class RankDrugRev:
 		self._raw_data_loaded = True
 
 	def fit_preprocess(self):
+		""" applying this function on self fits a preprocessing pipline on the train dataset loaded
+		by executing \"load_data(self)\" """
 
 		if not self._raw_data_loaded:
 			raise ValueError('raw data needs to be loaded first! ; execute \"load_data()\"')
@@ -97,14 +105,30 @@ class RankDrugRev:
 		self._seq_fitted = True
 
 
-	def transform_preprocess(self, data = 'train'):
+	def transform_preprocess(self, data = 'train', forModelorTest = True):
+		"""
 
-		if (data == 'train') & (self._raw_data_loaded) & (self._seq_fitted):
+		Parameters
+		----------
+		data : 
+			Default value = 'train') or 'train' for loaded datasets. Pass in a pandas dataframe if applying on an external dataset
+										dataframe should include columns = "drugName", "condition", "review", "rating", and "usefulCount"
+										if forModelorTest = False, usefulCount is not needed  
+		forModelorTest :
+			Default value = True) indicates whether 'data' has column usefulCount or not
+
+		Returns
+		-------
+		A list of predictors for the model and usefulCounts as model output and index of 'data' for which preprocessing has an answer
+
+		"""
+
+		if isinstance(data, pd.DataFrame):
+			df = data
+		elif (data == 'train') & (self._raw_data_loaded) & (self._seq_fitted):
 			df = self.raw_data_train
 		elif (data == 'test') & (self._raw_data_loaded) & (self._seq_fitted):
 			df = self.raw_data_test
-		elif isinstance(df, pd.DataFrame):
-			df = data
 		else:
 			raise ValueError("no data are loaded!")
 
@@ -130,87 +154,110 @@ class RankDrugRev:
 		df = df.iloc[idx,:] # cleaned up dataframe
 
 		df.dropna(inplace = True)
-
-		
+	
 
 		if df.empty:
 			raise ValueError('there is no relevant data in \"data\"!')
 
 
-
 		# preparing returns
-		pw_useC = self._pw_useC 
-		useC = pw_useC.transform(df['usefulCount'].values.reshape(-1,1))
 
 		drug_OH = enc_drug.transform(df["drugName"].values.reshape(-1,1)).toarray()
 		cond_OH = enc_cond.transform(df["condition"].values.reshape(-1,1)).toarray()
 
 		tokenizer = self._tokenizer
 		transformed_seqs = tokenizer.texts_to_sequences(df["review"].values)
-		transformed_seqs = pad_sequences(transformed_seqs)[:,:self.len_limit]
+		transformed_seqs = pad_sequences(transformed_seqs, maxlen = self.max_len)[:,:self.len_limit]
 
 		rating = df["rating"].values.reshape((-1,1))
 
-		assert transformed_seqs.shape[0] == rating.shape[0] == drug_OH.shape[0] == cond_OH.shape[0]\
-		 		== useC.shape[0] == df.index.shape[0]
-
-		return [transformed_seqs, drug_OH, cond_OH, rating], useC, df.index
-
-
-	def lstm_model(self, X, y , pretrained = True, model_file = 'drugRevKM.h5'):
-		
-		if not pretrained:
-
-			# defining model
-			input_layer1 = keras.Input(shape=(None,), dtype="int32")
-			embed1 = Embedding(X[0].max() + 1, 64)(input_layer1)
-			lstm1 = Bidirectional(LSTM(64, return_sequences=True))(embed1)
-			lstm2 = Bidirectional(LSTM(64))(lstm1)
-			dense_1 = Dense(1)(lstm2)
-
-			# input layer for drug 
-			input_layer2 = keras.Input(shape=(X[1].shape[1],), dtype="int32")
-			dense_2 = Dense(12, activation="relu")(input_layer2)
-			dense_3 = Dense(1, activation="relu")(dense_2)
-
-			# input layer for condition
-			input_layer3 = keras.Input(shape=(X[2].shape[1],), dtype="int32")
-			dense_4 = Dense(12, activation="relu")(input_layer3)
-			dense_5 = Dense(1, activation="relu")(dense_4)
-
-			# rating as an input
-			input_layer4 = keras.Input(shape=(X[3].shape[1],), dtype="int32")  
-			dense_6 = Dense(12, activation="relu")(input_layer4)
-			dense_7 = Dense(1, activation="relu")(dense_6)
-
-			concat_layer = Concatenate()([dense_1, dense_3, dense_5, dense_7])
-
-			dense_8 = Dense(4, activation = "relu")(concat_layer)
-			output = Dense(1)(dense_8)
-
-			model = keras.Model(inputs = [input_layer1, input_layer2, input_layer3, input_layer4], outputs = output)
-
-			model.compile(optimizer = keras.optimizers.Adam(learning_rate = 0.005), loss="mse")
-
-			history = model.fit(x = X , y = y, epochs = 4, validation_split = 0.2)
-
-			self._km_fitted = True
-
-			return model, history
+		if forModelorTest:
+			pw_useC = self._pw_useC 
+			useC = pw_useC.transform(df['usefulCount'].values.reshape(-1,1))
+			assert transformed_seqs.shape[0] == rating.shape[0] == drug_OH.shape[0] == cond_OH.shape[0]\
+				== useC.shape[0] == df.index.shape[0]
+			return [transformed_seqs, drug_OH, cond_OH, rating], useC, df.index
 
 		else:
+			assert transformed_seqs.shape[0] == rating.shape[0] == drug_OH.shape[0] == cond_OH.shape[0]\
+				== df.index.shape[0]
+			return [transformed_seqs, drug_OH, cond_OH, rating], df.index
 
-			try: 
-				model = load_model(model_file)
-				self.kmodel = model
-				print("pre-trainted model loaded!")
-				self._km_fitted = True
-			except OSError as err:
-				print("pre-trianed file not found!")
-			
+	def lstm_model(self, X, y):
+		"""
+
+		Parameters
+		----------
+		X : preprocessed inputs for lstm model 
+		
+		y:  preprocesses output for lstm model
+
+
+
+		Returns
+		-------
+		trained model and traning history
+
+		"""
+		
+
+		# defining model
+		input_layer1 = keras.Input(shape=(None,), dtype="int32")
+		embed1 = Embedding(X[0].max() + 1, 64)(input_layer1)
+		lstm1 = Bidirectional(LSTM(64, return_sequences=True))(embed1)
+		lstm2 = Bidirectional(LSTM(64))(lstm1)
+		dense_1 = Dense(1)(lstm2)
+
+		# input layer for drug 
+		input_layer2 = keras.Input(shape=(X[1].shape[1],), dtype="int32")
+		dense_2 = Dense(12, activation="relu")(input_layer2)
+		dense_3 = Dense(1, activation="relu")(dense_2)
+
+		# input layer for condition
+		input_layer3 = keras.Input(shape=(X[2].shape[1],), dtype="int32")
+		dense_4 = Dense(12, activation="relu")(input_layer3)
+		dense_5 = Dense(1, activation="relu")(dense_4)
+
+		# rating as an input
+		input_layer4 = keras.Input(shape=(X[3].shape[1],), dtype="int32")  
+		dense_6 = Dense(12, activation="relu")(input_layer4)
+		dense_7 = Dense(1, activation="relu")(dense_6)
+
+		concat_layer = Concatenate()([dense_1, dense_3, dense_5, dense_7])
+
+		dense_8 = Dense(4, activation = "relu")(concat_layer)
+		output = Dense(1)(dense_8)
+
+		model = keras.Model(inputs = [input_layer1, input_layer2, input_layer3, input_layer4], outputs = output)
+
+		model.compile(optimizer = keras.optimizers.Adam(learning_rate = 0.005), loss="mse")
+
+		history = model.fit(x = X , y = y, epochs = 4, validation_split = 0.2)
+
+		self._km_fitted = True
+
+		return model, history
+
+
 
 
 	def save_model(self, *fnames, model = None):
+		"""
+
+		Parameters
+		----------
+		*fnames : file names to which the trained model can be saved
+		
+		model :
+			(Default value = None)
+			lstm model object to be saved, otherwise only saving preprocessing model
+
+
+		Returns
+		-------
+		None
+
+		"""
 
 		if len(fnames) == 0:
 			raise TypeError('no file names were provided!')
@@ -230,8 +277,20 @@ class RankDrugRev:
 		else:
 			raise TypeError('no model was loaded! check fir correct arguments')
 
-	@classmethod
-	def load_model(cls, *fnames):
+	@staticmethod
+	def load_model(*fnames):
+		"""
+
+		Parameters
+		----------
+		*fnames : names of the files from which pretrained models can be loaded
+		
+
+		Returns
+		-------
+		model objects
+
+		"""
 
 		ret = [] 
 		if len(fnames) >= 1:
@@ -246,22 +305,50 @@ class RankDrugRev:
 
 		return tuple(ret)
 
-	@classmethod
+	@staticmethod
 	def plot_performance(y_obs, y_pred):
+		"""
+		plots model performance 
+		Parameters
+		----------
+		y_obs : observed output as (-1,1) numpy array
+		    param y_pred:
+		y_pred : predicted output as (-1,1) numpy array
+		    
+
+		Returns
+		-------
+		None
+		"""
 
 		tmp_df = pd.DataFrame({'obs' : y_obs.ravel(), 'model' : y_pred.ravel()})
 		ax = sns.displot(data = tmp_df, x = 'obs', y = 'model', kind = 'kde' )
-		ax.ax.set_xlim(-5, 5)
-		ax.ax.set_ylim(-5, 5)
+		ax.ax.set_xlim(-4, 4)
+		ax.ax.set_ylim(-4, 4)
+		plt.plot(np.linspace(-4,4,100),np.linspace(-4,4,100),'r.-')
 
 		plt.show()
 
 
+def rank_reviews(df):
+	"""
+	A standalone function that uses RankDrugRev class to rank the reviews on drugs included in 'df'
 
-		
+	Parameters
+	----------
+	df : a pandas dataframe that needs to have columns : 'drugName', 'condition', 'review' ,'rating'
 
 
+	Returns
+	-------
+	a pandas dataframe that is ranked based on an extra 'usefulness' column
+	"""
+	
+	preprocc, lstm_model = RankDrugRev.load_model('preprcc.dill','lstm_model.h5')
 
+	X, idx_known = preprocc.transform_preprocess(data = df, forModelorTest = False)
+	y_pred = lstm_model.predict(X)
+	df.loc[idx_known, 'usefulness'] = y_pred
+	df.sort_values(by=['usefulness'], inplace = True, ascending = False)
 
-
-
+	return df
